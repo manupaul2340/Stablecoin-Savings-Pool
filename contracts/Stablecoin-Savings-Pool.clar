@@ -6,6 +6,8 @@
 (define-constant ERR_ALREADY_CLAIMED (err u104))
 (define-constant ERR_NO_REWARDS_AVAILABLE (err u105))
 (define-constant ERR_TRANSFER_FAILED (err u106))
+(define-map auto-compound-enabled principal bool)
+(define-map auto-compound-total principal uint)
 
 (define-fungible-token pool-token)
 
@@ -214,4 +216,69 @@
     is-ubi-recipient: (is-ubi-recipient user),
     last-claim-block: (default-to u0 (map-get? user-last-claim user))
   }
+)
+
+(define-read-only (is-auto-compound-enabled (user principal))
+  (default-to false (map-get? auto-compound-enabled user))
+)
+
+(define-read-only (get-auto-compound-total (user principal))
+  (default-to u0 (map-get? auto-compound-total user))
+)
+
+(define-public (toggle-auto-compound)
+  (let (
+    (current-status (is-auto-compound-enabled tx-sender))
+  )
+    (map-set auto-compound-enabled tx-sender (not current-status))
+    (ok (not current-status))
+  )
+)
+
+(define-public (process-auto-compound (user principal))
+  (let (
+    (interest-reward (calculate-user-interest user))
+    (ubi-reward (calculate-ubi-amount user))
+    (total-reward (+ interest-reward ubi-reward))
+    (current-deposit (get-user-deposit user))
+    (current-pool-balance (var-get total-pool-balance))
+    (current-shares (get-user-pool-shares user))
+    (current-auto-compound-total (get-auto-compound-total user))
+  )
+    (asserts! (is-auto-compound-enabled user) ERR_NOT_AUTHORIZED)
+    (asserts! (> total-reward u0) ERR_NO_REWARDS_AVAILABLE)
+    
+    (let (
+      (new-deposit (+ current-deposit total-reward))
+      (new-shares (if (is-eq current-pool-balance u0)
+                    total-reward
+                    (/ (* total-reward (ft-get-supply pool-token)) current-pool-balance)))
+    )
+      (map-set user-deposits user new-deposit)
+      (map-set user-pool-shares user (+ current-shares new-shares))
+      (map-set user-last-claim user stacks-block-height)
+      (map-set auto-compound-total user (+ current-auto-compound-total total-reward))
+      (var-set total-pool-balance (+ current-pool-balance total-reward))
+      (var-set total-rewards-distributed (+ (var-get total-rewards-distributed) total-reward))
+      (try! (ft-mint? pool-token new-shares user))
+      (ok total-reward)
+    )
+  )
+)
+
+(define-public (claim-rewards-with-auto-compound)
+  (if (is-auto-compound-enabled tx-sender)
+    (process-auto-compound tx-sender)
+    (claim-rewards)
+  )
+)
+
+(define-read-only (get-user-stats-with-auto-compound (user principal))
+  (merge
+    (get-user-stats user)
+    {
+      auto-compound-enabled: (is-auto-compound-enabled user),
+      auto-compound-total: (get-auto-compound-total user)
+    }
+  )
 )
