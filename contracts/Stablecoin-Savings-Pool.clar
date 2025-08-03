@@ -9,6 +9,10 @@
 (define-map auto-compound-enabled principal bool)
 (define-map auto-compound-total principal uint)
 
+(define-constant ERR_GOAL_NOT_FOUND (err u107))
+(define-constant ERR_GOAL_ALREADY_EXISTS (err u108))
+(define-constant ERR_GOAL_DEADLINE_PASSED (err u109))
+
 (define-fungible-token pool-token)
 
 (define-data-var total-pool-balance uint u0)
@@ -280,5 +284,96 @@
       auto-compound-enabled: (is-auto-compound-enabled user),
       auto-compound-total: (get-auto-compound-total user)
     }
+  )
+)
+
+
+(define-map user-goals {user: principal, goal-id: uint} {target-amount: uint, deadline: uint, bonus-rate: uint, created-at: uint})
+(define-map user-goal-progress {user: principal, goal-id: uint} {current-amount: uint, milestone-rewards: uint, completed: bool})
+(define-map user-next-goal-id principal uint)
+
+(define-read-only (get-user-goal (user principal) (goal-id uint))
+  (map-get? user-goals {user: user, goal-id: goal-id})
+)
+
+(define-read-only (get-goal-progress (user principal) (goal-id uint))
+  (default-to {current-amount: u0, milestone-rewards: u0, completed: false}
+    (map-get? user-goal-progress {user: user, goal-id: goal-id}))
+)
+
+(define-read-only (get-next-goal-id (user principal))
+  (default-to u1 (map-get? user-next-goal-id user))
+)
+
+(define-public (create-savings-goal (target-amount uint) (deadline-blocks uint) (bonus-rate uint))
+  (let (
+    (goal-id (get-next-goal-id tx-sender))
+    (deadline (+ stacks-block-height deadline-blocks))
+  )
+    (asserts! (> target-amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (> deadline-blocks u0) ERR_INVALID_AMOUNT)
+    (asserts! (is-none (get-user-goal tx-sender goal-id)) ERR_GOAL_ALREADY_EXISTS)
+    
+    (map-set user-goals 
+      {user: tx-sender, goal-id: goal-id}
+      {target-amount: target-amount, deadline: deadline, bonus-rate: bonus-rate, created-at: stacks-block-height})
+    (map-set user-goal-progress 
+      {user: tx-sender, goal-id: goal-id}
+      {current-amount: u0, milestone-rewards: u0, completed: false})
+    (map-set user-next-goal-id tx-sender (+ goal-id u1))
+    (ok goal-id)
+  )
+)
+
+(define-public (update-goal-progress (user principal) (goal-id uint) (deposit-amount uint))
+  (let (
+    (goal (unwrap! (get-user-goal user goal-id) ERR_GOAL_NOT_FOUND))
+    (progress (get-goal-progress user goal-id))
+    (new-amount (+ (get current-amount progress) deposit-amount))
+    (milestone-bonus (calculate-milestone-bonus goal progress deposit-amount))
+  )
+    (asserts! (<= stacks-block-height (get deadline goal)) ERR_GOAL_DEADLINE_PASSED)
+    
+    (map-set user-goal-progress 
+      {user: user, goal-id: goal-id}
+      {current-amount: new-amount, 
+       milestone-rewards: (+ (get milestone-rewards progress) milestone-bonus),
+       completed: (>= new-amount (get target-amount goal))})
+    (ok milestone-bonus)
+  )
+)
+
+(define-read-only (calculate-milestone-bonus (goal {target-amount: uint, deadline: uint, bonus-rate: uint, created-at: uint}) 
+                                           (progress {current-amount: uint, milestone-rewards: uint, completed: bool}) 
+                                           (deposit-amount uint))
+  (let (
+    (target (get target-amount goal))
+    (current (get current-amount progress))
+    (new-total (+ current deposit-amount))
+    (quarter-target (/ target u4))
+    (half-target (/ target u2))
+    (three-quarter-target (/ (* target u3) u4))
+  )
+    (fold + (list
+      (if (and (< current quarter-target) (>= new-total quarter-target)) (/ (* deposit-amount (get bonus-rate goal)) u10000) u0)
+      (if (and (< current half-target) (>= new-total half-target)) (/ (* deposit-amount (get bonus-rate goal)) u5000) u0)
+      (if (and (< current three-quarter-target) (>= new-total three-quarter-target)) (/ (* deposit-amount (get bonus-rate goal)) u3333) u0)
+      (if (and (< current target) (>= new-total target)) (/ (* deposit-amount (get bonus-rate goal)) u2000) u0)
+    ) u0)
+  )
+)
+
+(define-public (claim-goal-rewards (goal-id uint))
+  (let (
+    (progress (get-goal-progress tx-sender goal-id))
+    (milestone-rewards (get milestone-rewards progress))
+  )
+    (asserts! (> milestone-rewards u0) ERR_NO_REWARDS_AVAILABLE)
+    
+    (map-set user-goal-progress 
+      {user: tx-sender, goal-id: goal-id}
+      (merge progress {milestone-rewards: u0}))
+    (try! (as-contract (stx-transfer? milestone-rewards tx-sender tx-sender)))
+    (ok milestone-rewards)
   )
 )
