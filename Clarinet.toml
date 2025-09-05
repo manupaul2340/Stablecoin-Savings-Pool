@@ -1,0 +1,28 @@
+[project]
+name = 'Stablecoin-Savings-Pool'
+description = ''
+authors = []
+telemetry = true
+cache_dir = '.\.cache'
+requirements = []
+[contracts.Stablecoin-Savings-Pool]
+path = 'contracts/Stablecoin-Savings-Pool.clar'
+clarity_version = 3
+epoch = 3.1
+
+[contracts.time-lock-booster]
+path = 'contracts/time-lock-booster.clar'
+clarity_version = 3
+epoch = 3.1
+[repl.analysis]
+passes = ['check_checker']
+
+[repl.analysis.check_checker]
+strict = false
+trusted_sender = false
+trusted_caller = false
+callee_filter = false
+
+[repl.remote_data]
+enabled = false
+api_url = 'https://api.hiro.so'
